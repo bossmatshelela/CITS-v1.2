@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base Application Theme for Android 12+ (API 31+) with Splash Screen API -->
+    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">@color/mohc_green_dark</item>
+        <item name="android:navigationBarColor">@color/mohc_green_dark</item>
+        <item name="android:windowSplashScreenBackground">@color/mohc_splash_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_mohc_cits_logo</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/mohc_splash_bg</item>
+    </style>
+
+    <!-- Branded Splash Screen Theme for CITS -->
+    <style name="Theme.CITS.Splash" parent="Theme.MyApplication">
+        <item name="android:windowSplashScreenBackground">@color/mohc_splash_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_mohc_cits_logo</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/mohc_splash_bg</item>
+    </style>
+</resources>

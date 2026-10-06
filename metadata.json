@@ -1,0 +1,8 @@
+{
+  "name": "CITS",
+  "description": "Ministry of Health and Child Care of Zimbabwe Child Immunisation Tracking \u0026 EHR Interoperability System.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
