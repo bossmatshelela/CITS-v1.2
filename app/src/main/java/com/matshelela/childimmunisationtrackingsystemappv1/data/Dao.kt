@@ -13,6 +13,12 @@ interface ImmunisationDao {
     @Query("SELECT * FROM child_profiles WHERE id = :id")
     fun getChildProfileById(id: Int): Flow<ChildProfile?>
 
+    @Query("SELECT * FROM child_profiles WHERE accessCode = :accessCode LIMIT 1")
+    suspend fun getChildProfileByAccessCode(accessCode: String): ChildProfile?
+
+    @Query("SELECT * FROM child_profiles WHERE isLinkedToParent = 1 ORDER BY name ASC")
+    fun getLinkedChildProfiles(): Flow<List<ChildProfile>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChildProfile(profile: ChildProfile): Long
 

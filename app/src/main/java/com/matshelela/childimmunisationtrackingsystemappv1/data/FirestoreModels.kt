@@ -15,7 +15,14 @@ data class FirestoreChildProfile(
     val contactPhone: String = "",
     val district: String = "",
     val clinicId: Int = 0,
-    val complianceStatus: String = "Due"
+    val complianceStatus: String = "Due",
+    val accessCode: String = "",
+    val assignedDoctorId: Int? = null,
+    val assignedDoctorName: String = "",
+    val healthChallenges: String = "",
+    val isLinkedToParent: Boolean = false,
+    val bloodGroup: String = "O+",
+    val birthWeight: String = "3.2 kg"
 ) {
     // Helper mapper from Room model to Firestore
     constructor(roomModel: ChildProfile) : this(
@@ -27,7 +34,14 @@ data class FirestoreChildProfile(
         contactPhone = roomModel.contactPhone,
         district = roomModel.district,
         clinicId = roomModel.clinicId,
-        complianceStatus = roomModel.complianceStatus
+        complianceStatus = roomModel.complianceStatus,
+        accessCode = roomModel.accessCode,
+        assignedDoctorId = roomModel.assignedDoctorId,
+        assignedDoctorName = roomModel.assignedDoctorName,
+        healthChallenges = roomModel.healthChallenges,
+        isLinkedToParent = roomModel.isLinkedToParent,
+        bloodGroup = roomModel.bloodGroup,
+        birthWeight = roomModel.birthWeight
     )
 
     fun toMap(): Map<String, Any?> {
@@ -40,7 +54,14 @@ data class FirestoreChildProfile(
             "contactPhone" to contactPhone,
             "district" to district,
             "clinicId" to clinicId,
-            "complianceStatus" to complianceStatus
+            "complianceStatus" to complianceStatus,
+            "accessCode" to accessCode,
+            "assignedDoctorId" to assignedDoctorId,
+            "assignedDoctorName" to assignedDoctorName,
+            "healthChallenges" to healthChallenges,
+            "isLinkedToParent" to isLinkedToParent,
+            "bloodGroup" to bloodGroup,
+            "birthWeight" to birthWeight
         )
     }
 }

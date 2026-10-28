@@ -1,0 +1,152 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for Custom Claims & Authentication Checks
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Role checks based strictly on cryptographically signed Custom Claims
+    function hasRole(role) {
+      return isAuthenticated() && request.auth.token.role == role;
+    }
+
+    function isMohAdmin() {
+      return hasRole('MOH_ADMIN');
+    }
+
+    function isFacilityAdmin() {
+      return hasRole('FACILITY_ADMIN');
+    }
+
+    function isDoctorNurse() {
+      return hasRole('DOCTOR_NURSE');
+    }
+
+    function isParent() {
+      return hasRole('PARENT');
+    }
+
+    // Verify parent authorization for a specific child record
+    function isParentOfChild(childId) {
+      return isParent() && (
+        exists(/databases/$(database)/documents/child_access_grants/$(request.auth.uid + '_' + childId)) ||
+        (resource != null && resource.data.parentUid == request.auth.uid)
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // 1. Child Profiles & Demographics Registry
+    // Persisted permanently for lifelong health tracking across Zimbabwe
+    // ------------------------------------------------------------------------
+    match /children/{childId} {
+      // MOH Admins: Read-only global audit access
+      // Facility Admins: Can read and manage registration / doctor linking
+      // Doctors/Nurses: Read-only (CANNOT create, delete, or modify patient profiles)
+      // Parents: Can ONLY read data matching their verified linked child ID
+      allow read: if isMohAdmin() 
+                  || isFacilityAdmin() 
+                  || isDoctorNurse() 
+                  || isParentOfChild(childId);
+
+      // Facility Admin registers children and assigns clinicians.
+      // Doctors and Parents have NO create, delete, or general profile modify privileges.
+      allow create: if isFacilityAdmin();
+
+      // Facility Admin can update administrative fields (e.g., assigning doctor, access code status).
+      // Doctors cannot modify patient demographic profiles.
+      allow update: if isFacilityAdmin();
+
+      // No client role can delete lifelong child demographic records
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. Lifelong Health Challenges & Clinical Observation History
+    // Allows tracking chronic conditions, allergies, and birth complications
+    // ------------------------------------------------------------------------
+    match /children/{childId}/health_challenges/{challengeId} {
+      allow read: if isMohAdmin() || isDoctorNurse() || isParentOfChild(childId);
+      
+      // Doctors/Nurses can record clinical observations & lifelong conditions
+      allow create, update: if isDoctorNurse();
+      
+      // Clinical records cannot be deleted by clients
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. Vaccination Records (ZEPI Schedule Logs)
+    // ------------------------------------------------------------------------
+    match /children/{childId}/vaccination_records/{recordId} {
+      // Parents can read their verified child's records
+      // Doctors, Facility Admins, and MOH Admins can read
+      allow read: if isMohAdmin() || isFacilityAdmin() || isDoctorNurse() || isParentOfChild(childId);
+
+      // Only certified Doctors/Nurses can administer doses and log batch numbers
+      allow create, update: if isDoctorNurse();
+
+      // Immunization logs are permanent legal medical records - no deletes allowed
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. Pairing Codes Collection (ZW-LINK-XXXX)
+    // Used for securely linking Parents to Child Profiles
+    // ------------------------------------------------------------------------
+    match /pairing_codes/{codeId} {
+      // Facility Admin can read and create codes for parents
+      allow read, write: if isFacilityAdmin();
+      
+      // Parents CANNOT read or query raw pairing codes directly from the client.
+      // Validation and redemption are strictly executed server-side via Cloud Functions.
+      allow read, write: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Child Access Grants
+    // Server-managed mapping between verified Parent UID and Child ID
+    // ------------------------------------------------------------------------
+    match /child_access_grants/{grantId} {
+      // Parents can read their own verified access grants
+      allow read: if isAuthenticated() && resource.data.parentUid == request.auth.uid;
+      
+      // Read access for Facility Admins and MoH audit
+      allow read: if isMohAdmin() || isFacilityAdmin();
+
+      // Grants can only be written server-side by the Cloud Function pairing exchange
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. Clinic Directory & Facilities Registry
+    // ------------------------------------------------------------------------
+    match /clinics/{clinicId} {
+      allow read: if isAuthenticated();
+      allow write: if isMohAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 7. Secure Messaging & Telehealth Consultations
+    // ------------------------------------------------------------------------
+    match /messages/{messageId} {
+      allow read: if isAuthenticated() && (
+        resource.data.senderId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid ||
+        isMohAdmin()
+      );
+      allow create: if isAuthenticated() && request.resource.data.senderId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 8. User Feedback & Service Telemetry
+    // ------------------------------------------------------------------------
+    match /user_feedback/{feedbackId} {
+      allow create: if isAuthenticated();
+      allow read: if isMohAdmin();
+      allow update, delete: if false;
+    }
+  }
+}

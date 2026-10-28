@@ -20,6 +20,10 @@ class ImmunisationRepository(private val dao: ImmunisationDao) {
 
     fun getChildProfileById(id: Int): Flow<ChildProfile?> = dao.getChildProfileById(id)
     
+    fun getLinkedChildProfiles(): Flow<List<ChildProfile>> = dao.getLinkedChildProfiles()
+
+    suspend fun getChildProfileByAccessCode(accessCode: String): ChildProfile? = dao.getChildProfileByAccessCode(accessCode)
+    
     fun getVaccinationRecordsByChild(childId: Int): Flow<List<VaccinationRecord>> = 
         dao.getVaccinationRecordsByChild(childId)
 
@@ -414,7 +418,14 @@ class ImmunisationRepository(private val dao: ImmunisationDao) {
                     healthPin = "ZW-MOH-2025-0421",
                     district = "Harare",
                     clinicId = 1,
-                    complianceStatus = "Compliant"
+                    complianceStatus = "Compliant",
+                    accessCode = "ZW-LINK-1042",
+                    assignedDoctorId = 2,
+                    assignedDoctorName = "Nurse Farai Moyo",
+                    healthChallenges = "Mild neonatal asthma; Penicillin sensitivity noted at 6 months; Normal growth curve",
+                    isLinkedToParent = true,
+                    bloodGroup = "A+",
+                    birthWeight = "3.4 kg"
                 )
             ).toInt()
             createCompletedHistoryForTinashe(tinasheId)
@@ -430,10 +441,40 @@ class ImmunisationRepository(private val dao: ImmunisationDao) {
                     healthPin = "ZW-MOH-2026-0814",
                     district = "Bulawayo",
                     clinicId = 2,
-                    complianceStatus = "Due"
+                    complianceStatus = "Due",
+                    accessCode = "ZW-LINK-2081",
+                    assignedDoctorId = 1,
+                    assignedDoctorName = "Dr. Sibusiso Sibanda",
+                    healthChallenges = "Low birth weight (2.4kg), recovered; Neonatal jaundice resolved with phototherapy; No known drug allergies",
+                    isLinkedToParent = true,
+                    bloodGroup = "O+",
+                    birthWeight = "2.4 kg"
                 )
             ).toInt()
             createZEPISchedule(ruvarasheId, "2026-01-20")
+
+            // Third mock patient registered by Facility Admin waiting for parent code entry:
+            val tanakaId = insertChildProfile(
+                ChildProfile(
+                    name = "Tanaka Nkomo",
+                    birthDate = "2026-02-12",
+                    gender = "Boy",
+                    motherName = "Sipho Nkomo",
+                    contactPhone = "+263 71 999 8888",
+                    healthPin = "ZW-MOH-2026-3094",
+                    district = "Bulawayo",
+                    clinicId = 2,
+                    complianceStatus = "Due",
+                    accessCode = "ZW-LINK-3094",
+                    assignedDoctorId = 1,
+                    assignedDoctorName = "Dr. Sibusiso Sibanda",
+                    healthChallenges = "Seasonal dry skin eczema; Normal neonatal reflexes; Blood Group O+; Birth Weight 3.1kg",
+                    isLinkedToParent = false,
+                    bloodGroup = "O+",
+                    birthWeight = "3.1 kg"
+                )
+            ).toInt()
+            createZEPISchedule(tanakaId, "2026-02-12")
             
             // Mark PCV 1 & Pentavalent 1 as administered, others pending
             val ruvarasheRecords = dao.getVaccinationRecordsByChild(ruvarasheId).first()

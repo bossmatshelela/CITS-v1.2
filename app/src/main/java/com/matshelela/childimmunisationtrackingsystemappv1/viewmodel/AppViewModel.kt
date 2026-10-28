@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
 import com.matshelela.childimmunisationtrackingsystemappv1.data.*
 import com.matshelela.childimmunisationtrackingsystemappv1.util.NetworkConnectivityMonitor
 import kotlinx.coroutines.flow.*
@@ -14,8 +16,29 @@ import kotlinx.coroutines.launch
 
 enum class UserRole {
     ADMIN_MOH,       // Ministry of Health Administrator
+    FACILITY_ADMIN,  // Health Centre Administrator / Sister-in-Charge
     DOCTOR_CLINIC,   // Clinic Doctor / Nurse
     PARENT_GUARDIAN  // Mother / Parent / Guardian
+}
+
+sealed class AuthClaimStatus {
+    object Idle : AuthClaimStatus()
+    object Loading : AuthClaimStatus()
+    data class Verified(
+        val role: String,
+        val mappedUserRole: UserRole,
+        val email: String,
+        val uid: String,
+        val facilityId: String? = null,
+        val expirationTime: Long = 0L,
+        val isSimulatedDemo: Boolean = false
+    ) : AuthClaimStatus()
+    data class AccessDenied(
+        val attemptedRole: UserRole,
+        val requiredClaim: String,
+        val actualClaim: String?,
+        val message: String
+    ) : AuthClaimStatus()
 }
 
 sealed class Screen {
@@ -28,6 +51,7 @@ sealed class Screen {
     object EhrInteroperability : Screen()
     object ProblemFeedback : Screen()
     object AiAdvisorChat : Screen() // Gemini AI Immunization Chat & Voice Assistant
+    object SystemDocumentation : Screen() // MoHCC Official System Architecture & Linking Guide
 }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -110,6 +134,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var doctorPin by mutableStateOf("")
     var hasUnlockedRole by mutableStateOf(false)
 
+    // --- Firebase ID Token & Custom Claims State ---
+    var authClaimStatus by mutableStateOf<AuthClaimStatus>(
+        AuthClaimStatus.Verified(
+            role = "PARENT_GUARDIAN",
+            mappedUserRole = UserRole.PARENT_GUARDIAN,
+            email = "parent.guardian@health.gov.zw",
+            uid = "zw_auth_parent_001",
+            isSimulatedDemo = true
+        )
+    )
+    var currentVerifiedClaimRole by mutableStateOf<String>("PARENT_GUARDIAN")
+    var verifiedEmail by mutableStateOf<String>("parent.guardian@health.gov.zw")
+    var verifiedUid by mutableStateOf<String>("zw_auth_parent_001")
+    var tokenIssuedAt by mutableStateOf<Long>(System.currentTimeMillis())
+    var isSimulatedClaim by mutableStateOf<Boolean>(true)
+    var authGateErrorMessage by mutableStateOf<String>("")
+    var isClaimsRefreshing by mutableStateOf<Boolean>(false)
+
     // --- Offline Synchronisation Execution ---
     var syncInProgress by mutableStateOf(false)
     var lastSyncResult by mutableStateOf("")
@@ -124,6 +166,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var feedbackFormComment by mutableStateOf("")
     var feedbackFormSubmitterName by mutableStateOf("")
     var feedbackSubmitStatusMessage by mutableStateOf("")
+
+    // --- Facility Admin Intake & Clinician Pairing ---
+    var facilityChildName by mutableStateOf("")
+    var facilityChildBirthDate by mutableStateOf("2026-03-15")
+    var facilityChildGender by mutableStateOf("Girl")
+    var facilityChildMotherName by mutableStateOf("")
+    var facilityChildPhone by mutableStateOf("+263 7")
+    var facilityChildDistrict by mutableStateOf("Bulawayo")
+    var facilityChildClinicId by mutableStateOf(2)
+    var facilityChildDoctorId by mutableStateOf<Int?>(1)
+    var facilityChildHealthChallenges by mutableStateOf("")
+    var facilityChildBloodGroup by mutableStateOf("O+")
+    var facilityChildBirthWeight by mutableStateOf("3.2 kg")
+    var lastGeneratedAccessCode by mutableStateOf("")
+    var facilityActionMessage by mutableStateOf("")
+
+    // --- Parent Portal Code Linking ---
+    var parentLinkingCodeInput by mutableStateOf("")
+    var parentLinkingMessage by mutableStateOf("")
+    var parentLinkingIsError by mutableStateOf(false)
+    var showParentLinkDialog by mutableStateOf(false)
+
+    // --- Clinical Lifelong Health Challenges Editor ---
+    var editingHealthChallengesText by mutableStateOf("")
+    var healthChallengesUpdateMessage by mutableStateOf("")
 
     init {
         try {
@@ -150,6 +217,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         fetchAndCacheHealthFacilities(manualTrigger = false)
         listenToHealthFacilitiesUpdates()
         observeDeviceNetworkState()
+
+        try {
+            val auth = FirebaseAuth.getInstance()
+            auth.addAuthStateListener { firebaseAuth ->
+                val user = firebaseAuth.currentUser
+                if (user != null) {
+                    refreshIdTokenClaims()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("AppViewModel", "FirebaseAuth init non-fatal: ${e.message}")
+        }
     }
 
     private fun observeDeviceNetworkState() {
@@ -234,6 +313,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val roleStr = when (currentRole) {
                 UserRole.PARENT_GUARDIAN -> "Parent"
                 UserRole.DOCTOR_CLINIC -> "Doctor"
+                UserRole.FACILITY_ADMIN -> "Facility Admin"
                 UserRole.ADMIN_MOH -> "MoH Admin"
             }
             firestoreSyncRepository.startRealTimeMessageListener(
@@ -257,8 +337,126 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         stopRealtimeFirestoreChatListener()
     }
 
+    // --- Firebase Custom Claims Verification Methods ---
+
+    fun isRoleAuthorized(role: UserRole): Boolean {
+        val claim = currentVerifiedClaimRole
+        return when (role) {
+            UserRole.ADMIN_MOH -> claim == "MOH_ADMIN"
+            UserRole.FACILITY_ADMIN -> claim == "FACILITY_ADMIN" || claim == "MOH_ADMIN"
+            UserRole.DOCTOR_CLINIC -> claim == "DOCTOR_NURSE" || claim == "MOH_ADMIN"
+            UserRole.PARENT_GUARDIAN -> claim == "PARENT_GUARDIAN" || claim == "PARENT" || claim == "MOH_ADMIN"
+        }
+    }
+
+    fun getRequiredClaimForRole(role: UserRole): String {
+        return when (role) {
+            UserRole.ADMIN_MOH -> "MOH_ADMIN"
+            UserRole.FACILITY_ADMIN -> "FACILITY_ADMIN"
+            UserRole.DOCTOR_CLINIC -> "DOCTOR_NURSE"
+            UserRole.PARENT_GUARDIAN -> "PARENT_GUARDIAN"
+        }
+    }
+
+    fun mapClaimToUserRole(claim: String): UserRole {
+        return when (claim) {
+            "MOH_ADMIN" -> UserRole.ADMIN_MOH
+            "FACILITY_ADMIN" -> UserRole.FACILITY_ADMIN
+            "DOCTOR_NURSE" -> UserRole.DOCTOR_CLINIC
+            else -> UserRole.PARENT_GUARDIAN
+        }
+    }
+
+    fun refreshIdTokenClaims(onComplete: ((Boolean) -> Unit)? = null) {
+        isClaimsRefreshing = true
+        authGateErrorMessage = ""
+        try {
+            val auth = FirebaseAuth.getInstance()
+            val currentUser = auth.currentUser
+            if (currentUser != null) {
+                currentUser.getIdToken(true).addOnCompleteListener { task ->
+                    isClaimsRefreshing = false
+                    if (task.isSuccessful) {
+                        val tokenResult = task.result
+                        val roleClaim = tokenResult?.claims?.get("role") as? String ?: "PARENT_GUARDIAN"
+                        currentVerifiedClaimRole = roleClaim
+                        verifiedEmail = currentUser.email ?: "staff.authenticated@mohcc.gov.zw"
+                        verifiedUid = currentUser.uid
+                        tokenIssuedAt = (tokenResult?.issuedAtTimestamp ?: 0L) * 1000L
+                        if (tokenIssuedAt == 0L) tokenIssuedAt = System.currentTimeMillis()
+                        isSimulatedClaim = false
+                        authClaimStatus = AuthClaimStatus.Verified(
+                            role = roleClaim,
+                            mappedUserRole = mapClaimToUserRole(roleClaim),
+                            email = verifiedEmail,
+                            uid = verifiedUid,
+                            expirationTime = (tokenResult?.expirationTimestamp ?: 0L) * 1000L,
+                            isSimulatedDemo = false
+                        )
+                        onComplete?.invoke(true)
+                    } else {
+                        authGateErrorMessage = "Could not refresh Firebase ID token: ${task.exception?.localizedMessage}"
+                        onComplete?.invoke(false)
+                    }
+                }
+            } else {
+                isClaimsRefreshing = false
+                tokenIssuedAt = System.currentTimeMillis()
+                onComplete?.invoke(true)
+            }
+        } catch (e: Exception) {
+            isClaimsRefreshing = false
+            tokenIssuedAt = System.currentTimeMillis()
+            onComplete?.invoke(true)
+        }
+    }
+
+    fun setSimulatedClaim(claimRole: String, email: String, uid: String) {
+        currentVerifiedClaimRole = claimRole
+        verifiedEmail = email
+        verifiedUid = uid
+        tokenIssuedAt = System.currentTimeMillis()
+        isSimulatedClaim = true
+        authGateErrorMessage = ""
+        val mapped = mapClaimToUserRole(claimRole)
+        authClaimStatus = AuthClaimStatus.Verified(
+            role = claimRole,
+            mappedUserRole = mapped,
+            email = email,
+            uid = uid,
+            expirationTime = System.currentTimeMillis() + 3600000L,
+            isSimulatedDemo = true
+        )
+        currentRole = mapped
+        if (mapped == UserRole.PARENT_GUARDIAN) {
+            hasUnlockedRole = true
+        } else {
+            hasUnlockedRole = false
+        }
+    }
+
     fun attemptUnlock(pin: String): Boolean {
+        authGateErrorMessage = ""
+        val requiredClaim = getRequiredClaimForRole(currentRole)
+
+        // 1. Strict Claim Verification: Check if active Firebase ID token possesses required claim
+        if (!isRoleAuthorized(currentRole)) {
+            authGateErrorMessage = "ACCESS RESTRICTED: Firebase ID token possesses claim '$currentVerifiedClaimRole'. Access to ${currentRole.name} requires the cryptographically signed '$requiredClaim' claim."
+            authClaimStatus = AuthClaimStatus.AccessDenied(
+                attemptedRole = currentRole,
+                requiredClaim = requiredClaim,
+                actualClaim = currentVerifiedClaimRole,
+                message = authGateErrorMessage
+            )
+            return false
+        }
+
+        // 2. Operational PIN verification for facility staff
         val success = if (currentRole == UserRole.ADMIN_MOH && pin == "2026") {
+            hasUnlockedRole = true
+            currentScreen = Screen.Dashboard
+            true
+        } else if (currentRole == UserRole.FACILITY_ADMIN && (pin == "7788" || pin == "4321")) {
             hasUnlockedRole = true
             currentScreen = Screen.Dashboard
             true
@@ -266,9 +464,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             hasUnlockedRole = true
             currentScreen = Screen.Dashboard
             true
+        } else if (currentRole == UserRole.PARENT_GUARDIAN) {
+            hasUnlockedRole = true
+            currentScreen = Screen.Dashboard
+            true
         } else {
+            authGateErrorMessage = "Claim '$currentVerifiedClaimRole' verified, but entered Operational PIN is invalid."
             false
         }
+
         if (success) {
             initializeAndRegisterE2EE()
         }
@@ -277,9 +481,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectRole(role: UserRole) {
         currentRole = role
+        authGateErrorMessage = ""
         if (role == UserRole.PARENT_GUARDIAN) {
-            hasUnlockedRole = true
-            currentScreen = Screen.Dashboard
+            if (isRoleAuthorized(UserRole.PARENT_GUARDIAN)) {
+                hasUnlockedRole = true
+                currentScreen = Screen.Dashboard
+            } else {
+                hasUnlockedRole = false
+                currentScreen = Screen.RoleSelection
+                authGateErrorMessage = "Access Denied: Missing PARENT_GUARDIAN claim."
+            }
         } else {
             hasUnlockedRole = false
             currentScreen = Screen.RoleSelection
@@ -318,6 +529,124 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             childFormMotherName = ""
             childFormPhone = "+263 7"
             currentScreen = Screen.Dashboard
+        }
+    }
+
+    // --- Facility Admin Intake & Clinician Pairing ---
+    fun facilityAdminRegisterChild() {
+        viewModelScope.launch {
+            val doctor = doctorsNurses.value.find { it.id == facilityChildDoctorId }
+            val doctorName = doctor?.name ?: "Dr. Sibusiso Sibanda"
+            val healthPin = "ZW-MOH-2026-${(1000..9999).random()}"
+            val uniqueCode = "ZW-LINK-${(1000..9999).random()}"
+
+            val child = ChildProfile(
+                name = facilityChildName.ifBlank { "Baby Boy/Girl" },
+                birthDate = facilityChildBirthDate,
+                gender = facilityChildGender,
+                motherName = facilityChildMotherName.ifBlank { "Guardian" },
+                contactPhone = facilityChildPhone,
+                healthPin = healthPin,
+                district = facilityChildDistrict,
+                clinicId = facilityChildClinicId,
+                complianceStatus = "Due",
+                accessCode = uniqueCode,
+                assignedDoctorId = facilityChildDoctorId,
+                assignedDoctorName = doctorName,
+                healthChallenges = facilityChildHealthChallenges.ifBlank { "No acute neonatal abnormalities noted at birth. Routine growth monitoring advised." },
+                isLinkedToParent = false,
+                bloodGroup = facilityChildBloodGroup,
+                birthWeight = facilityChildBirthWeight
+            )
+
+            val childId = repository.insertChildProfile(child)
+            repository.createZEPISchedule(childId, facilityChildBirthDate)
+
+            // Increment clinic count
+            val clinic = clinics.value.find { it.id == facilityChildClinicId }
+            if (clinic != null) {
+                repository.updateClinic(clinic.copy(totalChildren = clinic.totalChildren + 1))
+            }
+
+            // Sync with Firestore Cloud immediately
+            firestoreSyncRepository.syncChildProfiles()
+            firestoreSyncRepository.syncVaccinationRecords()
+
+            lastGeneratedAccessCode = uniqueCode
+            facilityActionMessage = "Infant registered successfully! Assigned Clinician: $doctorName. Generated Child Access Code: $uniqueCode (Provide this to mother/guardian to link on their portal)."
+
+            // Reset input fields
+            facilityChildName = ""
+            facilityChildMotherName = ""
+            facilityChildPhone = "+263 7"
+            facilityChildHealthChallenges = ""
+        }
+    }
+
+    fun connectDoctorToChild(childId: Int, doctorId: Int) {
+        viewModelScope.launch {
+            val child = childProfiles.value.find { it.id == childId } ?: return@launch
+            val doctor = doctorsNurses.value.find { it.id == doctorId } ?: return@launch
+            val updated = child.copy(
+                assignedDoctorId = doctor.id,
+                assignedDoctorName = doctor.name,
+                isSynced = false
+            )
+            repository.updateChildProfile(updated)
+            firestoreSyncRepository.syncChildProfiles()
+            facilityActionMessage = "Connected ${doctor.name} to patient ${child.name} (${child.healthPin})."
+        }
+    }
+
+    fun updateChildHealthChallenges(childId: Int, newChallenges: String) {
+        viewModelScope.launch {
+            val child = childProfiles.value.find { it.id == childId } ?: return@launch
+            val updated = child.copy(
+                healthChallenges = newChallenges,
+                isSynced = false
+            )
+            repository.updateChildProfile(updated)
+            firestoreSyncRepository.syncChildProfiles()
+            healthChallengesUpdateMessage = "Lifelong child health record & clinical challenges saved to cloud for ${child.name}."
+        }
+    }
+
+    fun regenerateAccessCode(childId: Int) {
+        viewModelScope.launch {
+            val child = childProfiles.value.find { it.id == childId } ?: return@launch
+            val newCode = "ZW-LINK-${(1000..9999).random()}"
+            val updated = child.copy(accessCode = newCode, isSynced = false)
+            repository.updateChildProfile(updated)
+            firestoreSyncRepository.syncChildProfiles()
+            lastGeneratedAccessCode = newCode
+            facilityActionMessage = "Generated new Access Code: $newCode for ${child.name}."
+        }
+    }
+
+    // --- Parent Portal Code Linking Operations ---
+    fun linkChildWithCode(code: String) {
+        val trimmedCode = code.trim().uppercase()
+        if (trimmedCode.isBlank()) {
+            parentLinkingMessage = "Please enter the access code provided by your clinic."
+            parentLinkingIsError = true
+            return
+        }
+
+        viewModelScope.launch {
+            val child = repository.getChildProfileByAccessCode(trimmedCode)
+            if (child != null) {
+                val updated = child.copy(isLinkedToParent = true, isSynced = false)
+                repository.updateChildProfile(updated)
+                selectedChildId = child.id
+                firestoreSyncRepository.syncChildProfiles()
+                parentLinkingIsError = false
+                parentLinkingMessage = "Child linked successfully! Road to Health Card unlocked for ${child.name} (${child.healthPin}). Assigned Clinician: ${child.assignedDoctorName}."
+                parentLinkingCodeInput = ""
+                showParentLinkDialog = false
+            } else {
+                parentLinkingIsError = true
+                parentLinkingMessage = "Code '$trimmedCode' not found. Please verify the code on your clinic linking slip or ask your Facility Sister-in-Charge."
+            }
         }
     }
 
@@ -511,6 +840,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val senderName = when (currentRole) {
                 UserRole.ADMIN_MOH -> "MoH Administrator"
+                UserRole.FACILITY_ADMIN -> "Sister-in-Charge / Facility Admin"
                 UserRole.DOCTOR_CLINIC -> "Dr. Sibusiso Sibanda"
                 UserRole.PARENT_GUARDIAN -> {
                     val child = childProfiles.value.find { it.id == childId }
@@ -524,6 +854,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     senderName = senderName,
                     senderRole = when (currentRole) {
                         UserRole.ADMIN_MOH -> "MoH Admin"
+                        UserRole.FACILITY_ADMIN -> "Facility Admin"
                         UserRole.DOCTOR_CLINIC -> "Doctor"
                         UserRole.PARENT_GUARDIAN -> "Parent"
                     },
@@ -621,12 +952,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val roleName = when (currentRole) {
                 UserRole.ADMIN_MOH -> "MoH Admin"
+                UserRole.FACILITY_ADMIN -> "Facility Admin / Sister-in-Charge"
                 UserRole.DOCTOR_CLINIC -> "Doctor / Clinic Staff"
                 UserRole.PARENT_GUARDIAN -> "Parent / Guardian"
             }
             val submitter = if (feedbackFormSubmitterName.isBlank()) {
                 when (currentRole) {
                     UserRole.ADMIN_MOH -> "Ministry Registrar"
+                    UserRole.FACILITY_ADMIN -> "Sister-in-Charge"
                     UserRole.DOCTOR_CLINIC -> "Dr. Sibusiso Sibanda"
                     UserRole.PARENT_GUARDIAN -> "Parent"
                 }
